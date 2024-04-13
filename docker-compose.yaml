@@ -1,0 +1,103 @@
+version: "3.9"
+networks:
+  credentials_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: "169.254.170.0/24"
+          gateway: 169.254.170.1
+services:
+  # This container sends credentials to your containers
+  ecs-local-endpoints:
+    container_name: ecs-local-container-endpoints
+    # The Amazon ECS Local Container Endpoints Docker Image
+    image: amazon/amazon-ecs-local-container-endpoints
+    volumes:
+      # Mount /var/run so we can access docker.sock and talk to Docker
+      - /var/run:/var/run
+      # Mount the shared configuration directory, used by the AWS CLI and AWS SDKs
+      # On Windows, this directory can be found at "%UserProfile%\.aws"
+      - $HOME/.aws/:/home/.aws/
+    environment:
+      # define the home folder; credentials will be read from $HOME/.aws
+      HOME: "/home"
+      # You can change which AWS CLI Profile is used
+      AWS_PROFILE: "default"
+    networks:
+      credentials_network:
+        # This special IP address is recognized by the AWS SDKs and AWS CLI
+        ipv4_address: "169.254.170.2"
+    healthcheck:
+      test: ["CMD", "curl", "http://169.254.170.2/creds"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  redis:
+    container_name: redis
+    image: redis:alpine
+    networks:
+      credentials_network:
+        ipv4_address: "169.254.170.4"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  rq-monitor:
+    container_name: rq-monitor
+    image: pranavgupta1234/rqmonitor
+    depends_on:
+      - rq-upload
+      - redis
+    networks:
+      credentials_network:
+    ports:
+      - 8899:8899
+    env_file:
+      - rqmonitor.env
+
+  rq-upload:
+    image: whiskeyjack_upload:latest
+    working_dir: /usr/src/app/whiskeyjack_upload/worker
+    depends_on:
+      - api
+    networks:
+      credentials_network:
+    environment:
+      AWS_DEFAULT_REGION: "us-west-2"
+      AWS_CONTAINER_CREDENTIALS_RELATIVE_URI: "/creds"
+      PYTHONPATH: "/usr/src/app"
+    volumes:
+      - "./whiskeyjack_upload:/usr/src/app/whiskeyjack_upload"
+      - app-volume:/usr/src/app/appdata
+    command: python rq_worker.py upload_queue
+    scale: 1
+    env_file:
+      - ephemeral.env
+  api:
+    container_name: whiskeyjack_upload-api
+    build: .
+    image: whiskeyjack_upload:latest
+#    restart: always
+    ports:
+      - "8080:8080"
+    networks:
+      credentials_network:
+        ipv4_address: "169.254.170.3"
+    environment:
+      AWS_DEFAULT_REGION: "us-west-2"
+      AWS_CONTAINER_CREDENTIALS_RELATIVE_URI: "/creds"
+    volumes:
+      - "./whiskeyjack_upload:/usr/src/app/whiskeyjack_upload"
+      - app-volume:/usr/src/app/appdata
+    stdin_open: true   # Add this line into your service
+    tty: true   # Add this line into your service
+    env_file:
+      - ephemeral.env
+
+volumes:
+  app-volume:
